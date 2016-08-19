@@ -14,6 +14,7 @@ import tempfile
 import pickle
 import datetime
 import base64
+import re
 
 import nuke
 import nukescripts
@@ -52,15 +53,6 @@ class TankWriteNodeHandler(object):
         self._promoted_knobs = {}
         self._profile_names = []
         self._profiles = {}
-        for profile in self._app.get_setting("write_nodes", []):
-            name = profile["name"]
-            if name in self._profiles:
-                self._app.log_warning("Configuration contains multiple Write Node profiles called '%s'!  Only the "
-                                      "first will be available" % name)                
-                continue
-            
-            self._profile_names.append(name)
-            self._profiles[name] = profile
         
         self.__currently_rendering_nodes = set()
         self.__node_computed_path_settings_cache = {}
@@ -68,6 +60,8 @@ class TankWriteNodeHandler(object):
         # flags to track when the render and proxy paths are being updated.
         self.__is_updating_render_path = False
         self.__is_updating_proxy_path = False
+
+        self.populate_profiles_from_settings()
             
     ################################################################################################
     # Properties
@@ -81,6 +75,29 @@ class TankWriteNodeHandler(object):
             
     ################################################################################################
     # Public methods
+
+    def populate_profiles_from_settings(self):
+        """
+        Sources profile definitions from the current app settings.
+        """
+        self._profiles = {}
+        self._profile_names = []
+
+        for profile in self._app.get_setting("write_nodes", []):
+            name = profile["name"]
+            if name in self._profiles:
+                self._app.log_warning("Configuration contains multiple Write Node profiles called '%s'!  Only the "
+                                      "first will be available" % name)                
+                continue
+            
+            self._profile_names.append(name)
+            self._profiles[name] = profile
+
+    def populate_script_template(self):
+        """
+        Sources the current context's work file template from the parent app.
+        """
+        self._script_template = self._app.get_template("template_script_work")
             
     def get_nodes(self):
         """
@@ -190,8 +207,8 @@ class TankWriteNodeHandler(object):
         the current script path and configuraton
         """
         is_proxy = node.proxy()
-        self.__update_render_path(node, force_reset = True, is_proxy = is_proxy)     
-        self.__update_render_path(node, force_reset = True, is_proxy = (not is_proxy))
+        self.__update_render_path(node, force_reset=True, is_proxy=is_proxy)     
+        self.__update_render_path(node, force_reset=True, is_proxy=(not is_proxy))
 
     def create_new_node(self, profile_name):
         """
@@ -1172,14 +1189,16 @@ class TankWriteNodeHandler(object):
         if not reset_all_settings:
             tcl_settings = node.knob("tk_write_node_settings").value()
             if tcl_settings:
-                write_node.readKnobs(pickle.loads(str(base64.b64decode(tcl_settings))))
-                # The file and proxy knobs are going to have lost their reference to
-                # the gizmo's top-level path caches. We need to hook those back up.
-                file_refs = ("""
-                    file  "\[python __import__('nuke')._shotgun_write_node_handler.on_compute_path_gizmo_callback() if hasattr(__import__('nuke'), '_shotgun_write_node_handler') else nuke.thisParent().knob('cached_path').value()]"
-                    proxy "\[python __import__('nuke')._shotgun_write_node_handler.on_compute_proxy_path_gizmo_callback() if hasattr(__import__('nuke'), '_shotgun_write_node_handler') else nuke.thisParent().knob('tk_cached_proxy_path').value()]"
-                """)
-                write_node.readKnobs(file_refs)
+                knob_settings = pickle.loads(str(base64.b64decode(tcl_settings)))
+                # We need to remove the "file" and "proxy" settings that are always
+                # going to be baked into these knob settings. If we don't, the baked-out
+                # paths will replace the expressions that we have hooked up for those
+                # knobs.
+                filtered_settings = []
+                for setting in re.split(r"\n", knob_settings):
+                    if not setting.startswith("file ") and not setting.startswith("proxy "):
+                        filtered_settings.append(setting)
+                write_node.readKnobs(r"\n".join(filtered_settings))
                 self.reset_render_path(node)
         
         # set the file_type
